@@ -1,0 +1,96 @@
+# 放到你 fork 的 WeKnora 仓库 .github/workflows/ 下（Add file -> Upload files）。
+# 只构建 Windows 桌面 App，裁掉 Linux/macOS（你不需要它们）。
+#
+# ⚠️ 两处与上游 release-lite.yml 的刻意差异（上游工作流当前对所有平台都是坏的）：
+#   1. go-version 用 1.26——项目根 go.mod 要求 go 1.26.0，上游钉的 1.24 会被 go.mod 拒绝
+#      （你的报错：wails v2.17.0 requires go >= 1.25.0 (running go 1.24.13; GOTOOLCHAIN=local)）
+#   2. wails CLI 钉到 @v2.12.0——与项目 go.mod 锁定的 wails 库版本一致；
+#      上游用 @latest 已漂移到 v2.17.0
+#
+# 触发：Actions -> Release Lite Windows Desktop -> Run workflow -> tag 填 v0.8.3
+# 产物：run 页面底部 Artifacts -> desktop-windows-amd64（zip 内含 _setup.exe）
+
+name: Release Lite Windows Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.8.3)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-desktop-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI (钉到项目 go.mod 的 v2.12.0，勿用 @latest)
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Install NSIS (Windows)
+        run: choco install nsis -y
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Pre-compile Go packages (warm cache)
+        run: |
+          export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
+          export CGO_CFLAGS="-Wno-deprecated-declarations"
+          cd cmd/desktop
+          go build -p 1 -buildvcs=false -tags "desktop,sqlite_fts5,production" -o _prebuild_tmp.exe . || true
+          rm -f _prebuild_tmp.exe
+
+      - name: Build desktop app
+        run: |
+          export EDITION=lite
+          export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
+          eval "$(./scripts/get_version.sh env)"
+          LDFLAGS="$(./scripts/get_version.sh ldflags) -X 'google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn'"
+          export CGO_CFLAGS="-Wno-deprecated-declarations"
+          bash ./scripts/check-license-bundle.sh
+          cd cmd/desktop
+          wails build -clean \
+            -tags "sqlite_fts5" \
+            -platform "windows/amd64" \
+            -nsis \
+            -ldflags="${LDFLAGS}" \
+            -o "WeKnora Lite"
+
+      - name: Package Windows app
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          ARCHIVE="WeKnora-Lite-App_${VERSION}_windows_amd64"
+          INSTALLER="cmd/desktop/build/bin/WeKnora Lite-amd64-installer.exe"
+          test -f "$INSTALLER"
+          cp "$INSTALLER" "${ARCHIVE}_setup.exe"
+          sha256sum "${ARCHIVE}_setup.exe" > "${ARCHIVE}_setup.exe.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-windows-amd64
+          path: |
+            WeKnora-Lite-App_*_setup.exe
+            WeKnora-Lite-App_*_setup.exe.sha256
+          retention-days: 7

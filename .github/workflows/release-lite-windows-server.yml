@@ -1,0 +1,88 @@
+# 放到你 fork 的 WeKnora 仓库 .github/workflows/ 下，手动触发。
+# 用途：上游 release-lite.yml 在 Windows 只出桌面 App（NSIS 安装器），
+#       不出无头 server 二进制。本工作流补上 WeKnora-lite_windows_amd64，
+#       供易策（Tauri）以 sidecar 方式集成（方案A POC 用）。
+# 触发：Actions -> Release Lite Windows Server -> Run workflow -> tag 填 v0.8.3
+# 注意：未实测，若某步红叉看日志最后几行微调（多为路径/依赖细节）。
+
+name: Release Lite Windows Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.8.3)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-server:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend (server 二进制内嵌 web UI)
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Place frontend dist into web/
+        run: |
+          mkdir -p web
+          cp -r frontend/dist/. web/
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          export EDITION=lite
+          export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
+          export CGO_CFLAGS="-Wno-deprecated-declarations"
+          eval "$(./scripts/get_version.sh env)"
+          LDFLAGS="-w -s $(./scripts/get_version.sh ldflags)"
+          go build -tags "sqlite_fts5" -ldflags="${LDFLAGS}" \
+            -o WeKnora-lite.exe ./cmd/server
+
+      - name: Package tarball
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          ARCHIVE="WeKnora-lite_${VERSION}_windows_amd64"
+          mkdir -p "${ARCHIVE}/web"
+          cp WeKnora-lite.exe "${ARCHIVE}/"
+          bash ./scripts/copy-licenses.sh "${ARCHIVE}"
+          cp .env.lite.example "${ARCHIVE}/"
+          cp docs/LITE.md "${ARCHIVE}/README.md"
+          if [ -d config ]; then cp -r config "${ARCHIVE}/config"; fi
+          if [ -d migrations/sqlite ]; then
+            mkdir -p "${ARCHIVE}/migrations/sqlite"
+            cp -r migrations/sqlite/* "${ARCHIVE}/migrations/sqlite/"
+          fi
+          tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
+          sha256sum "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-amd64
+          path: WeKnora-lite_*.tar.gz*
+          retention-days: 3
